@@ -17,13 +17,16 @@
 
 var ws = new WebSocket('wss://' + location.host + '/one2many');
 var video;
+var activeVideo;
 var webRtcPeer;
+var activeRtcPeer;
 
 window.onload = function() {
 	console = new Console();
 	video = document.getElementById('video');
-
+	activeVideo = document.getElementById('active-video');
 	document.getElementById('call').addEventListener('click', function() { presenter(); } );
+	document.getElementById('raise-hand').addEventListener('click', function() { student(); });
 	document.getElementById('viewer').addEventListener('click', function() { viewer(); } );
 	document.getElementById('terminate').addEventListener('click', function() { stop(); } );
 }
@@ -42,6 +45,9 @@ ws.onmessage = function(message) {
 		break;
 	case 'viewerResponse':
 		viewerResponse(parsedMessage);
+		break;
+	case 'activeRequest':
+		studentAccept(parsedMessage);
 		break;
 	case 'stopCommunication':
 		dispose();
@@ -64,6 +70,23 @@ function presenterResponse(message) {
 	}
 }
 
+function studentAccept(message) {
+	if(!activeRtcPeer) {
+		showSpinner(activeVideo);
+		const options = {
+			localVideo: activeVideo,
+			onicecandidate: onIceCandidate
+		}
+		const activeRtcPeer = kurentoUtils.WebRtcPeer.WebRtcPeerRecvonly(options, function(error) {
+			if(error) return onError(error);
+	
+			this.generateOffer(onOfferViewer);
+		});
+	}
+	activeRtcPeer.processAnswer(message.sdpAnswer);
+	
+}
+
 function viewerResponse(message) {
 	if (message.response != 'accepted') {
 		var errorMsg = message.message ? message.message : 'Unknow error';
@@ -72,6 +95,31 @@ function viewerResponse(message) {
 	} else {
 		webRtcPeer.processAnswer(message.sdpAnswer);
 	}
+}
+
+function student() {
+	if(!activeRtcPeer) {
+		var options = {
+			localVideo: activeVideo,
+			onicecandidate: onIceCandidate
+		}
+
+		activeRtcPeer = kurentoUtils.WebRtcPeer.WebRtcPeerSendonly(options, function(error) {
+			if(error) return onError(error);
+
+			this.generateOffer(onOfferActiveStudent);
+		});
+	}
+}
+
+function onOfferActiveStudent(error, offerSdp) {
+	if(error) return onError(error);
+
+	var message = {
+		id: 'active_student',
+		sdpOffer: offerSdp
+	};
+	sendMessage(message);
 }
 
 function presenter() {

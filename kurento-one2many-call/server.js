@@ -19,7 +19,7 @@ var path = require('path');
 var url = require('url');
 var express = require('express');
 var minimist = require('minimist');
-var ws = require('ws');
+var WebSocket = require('ws');
 var kurento = require('kurento-client');
 var fs    = require('fs');
 var https = require('https');
@@ -27,7 +27,7 @@ var https = require('https');
 var argv = minimist(process.argv.slice(2), {
     default: {
         as_uri: 'https://localhost:8443/',
-        ws_uri: 'ws://localhost:8888/kurento'
+        ws_uri: 'ws://35.240.252.104:8888/kurento'
     }
 });
 
@@ -44,8 +44,10 @@ var app = express();
  */
 var idCounter = 0;
 var candidatesQueue = {};
+var studentCandidatesQueue = {};
 var kurentoClient = null;
 var presenter = null;
+var activeStudent = null;
 var viewers = [];
 var noPresenterMessage = 'No active presenter. Try again later...';
 
@@ -59,7 +61,7 @@ var server = https.createServer(options, app).listen(port, function() {
     console.log('Open ' + url.format(asUrl) + ' with a WebRTC capable browser');
 });
 
-var wss = new ws.Server({
+var wss = new WebSocket.Server({
     server : server,
     path : '/one2many'
 });
@@ -108,7 +110,18 @@ wss.on('connection', function(ws) {
 				}));
 			});
 			break;
-
+		case 'active_student':
+			startActiveStudent(sessionId, ws, message.sdpOffer, function(error, sdpAnswer) {
+				wss.clients.forEach(function(client) {
+					if(client.readyState == WebSocket.OPEN && client != ws) {
+						client.send(JSON.stringify({
+							id: 'activeRequest',
+							sdpAnswer: sdpAnswer
+						}));
+					}
+				});
+			});
+			break;
         case 'viewer':
 			startViewer(sessionId, ws, message.sdpOffer, function(error, sdpAnswer) {
 				if (error) {
@@ -165,6 +178,88 @@ function getKurentoClient(callback) {
         kurentoClient = _kurentoClient;
         callback(null, kurentoClient);
     });
+}
+
+function startActiveStudent(sessionId, ws, sdpOffer, callback) {
+	
+	if(activeStudent !== null) {
+		stop(sessionId);
+		return callback("Another user is currently acting as active student. Try again later...");
+	}
+
+	activeStudent = {
+		id: sessionId,
+		pipeline: null,
+		webRtcEndpoint: null
+	}
+
+	getKurentoClient(function(error, kurentoClient) {
+		if(error) {
+			stop(sessionId);
+			return callback(error);
+		}
+		if(activeStudent === null) {
+			stop(sessionId);
+			return callback("No activeStudent initialized");
+		}
+		kurentoClient.create("MediaPipeline", function(error, pipeline) {
+			
+			if(error) {
+				stop(sessionId);
+				return callback(error);
+			}
+
+			if(activeStudent === null) {
+				stop(sessionId);
+				return callback("No activeStudent initialized");
+			}
+
+			activeStudent.pipeline = pipeline;
+			pipeline.create('WebRtcEndpoint', function(error, webRtcEndpoint) {
+				if(error) {
+					stop(sessionId);
+					return callback(error);
+				}
+	
+				if(activeStudent === null) {
+					stop(sessionId);
+					return callback("No activeStudent initialized");
+				}
+
+				activeStudent.webRtcEndpoint = webRtcEndpoint;
+
+				webRtcEndpoint.on('OnIceCandidate', function(event) {
+                    var candidate = kurento.getComplexType('IceCandidate')(event.candidate);
+                    ws.send(JSON.stringify({
+                        id : 'iceCandidate',
+                        candidate : candidate
+                    }));
+                });
+
+				webRtcEndpoint.processOffer(sdpOffer, function(error, sdpAnswer) {
+					if (error) {
+						stop(sessionId);
+						return callback(error);
+					}
+
+					if (presenter === null) {
+						stop(sessionId);
+						return callback(noPresenterMessage);
+					}
+
+					callback(null, sdpAnswer);
+				});
+
+                webRtcEndpoint.gatherCandidates(function(error) {
+                    if (error) {
+                        stop(sessionId);
+                        return callback(error);
+                    }
+                });
+			})
+		});
+	});
+
 }
 
 function startPresenter(sessionId, ws, sdpOffer, callback) {
@@ -354,7 +449,7 @@ function stop(sessionId) {
 
 	clearCandidatesQueue(sessionId);
 
-	if (viewers.length < 1 && !presenter) {
+	if (kurentoClient && viewers.length < 1 && !presenter) {
         console.log('Closing kurento client');
         kurentoClient.close();
         kurentoClient = null;
